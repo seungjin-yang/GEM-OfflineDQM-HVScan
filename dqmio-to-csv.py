@@ -1,11 +1,75 @@
 from pathlib import Path
 from enum import Enum
+from dataclasses import dataclass
+import yaml
+import re
 import argparse
-from collections import namedtuple
+import warnings
 import pandas as pd
 import ROOT
 
-GEMLayerId = namedtuple("GEMLayerId", ("region", "station", "layer"))
+LAYER_LABEL_PATTERN = re.compile("^GE[0-2]1-(M|P)-L[1-6]$")
+LAYER_ONLINE_LABEL_PATTERN = re.compile("^GE(\+|\-)[0-2]\/1L[1-6]$")
+LAYER_OFFLINE_LABEL_PATTERN = re.compile("^GE(\+|\-)[0-2]1_L[1-6]$")
+ME_PATTERN = re.compile("^chamber_GE(\+|\-)[0-2]1_L[1-6]$")
+
+@dataclass(frozen=True, eq=True)
+class GEMLayerId:
+    region: int
+    station: int
+    layer: int
+
+    @classmethod
+    def from_label(cls, label):
+        r"""
+        e.g. GE11-P-L1
+        """
+        assert LAYER_LABEL_PATTERN.match(label), label
+        region = 1 if label[5] == "P" else -1
+        station = int(label[2])
+        layer = int(label[-1])
+        return cls(region, station, layer)
+
+    @classmethod
+    def from_online_label(cls, label):
+        r"""
+        e.g. GE+1/1L1
+        """
+        assert LAYER_ONLINE_LABEL_PATTERN.match(label), label
+        region = 1 if label[2] == "+" else -1
+        station = int(label[3])
+        layer = int(label[-1])
+        return cls(region, station, layer)
+
+    @classmethod
+    def from_offline_label(cls, label):
+        r"""actually name, not label
+        e.g. GE+11_L1
+        """
+        assert LAYER_OFFLINE_LABEL_PATTERN.match(label), label
+        region = 1 if label[2] == "+" else -1
+        station = int(label[3])
+        layer = int(label[-1])
+        return cls(region, station, layer)
+
+    @property
+    def region_sign(self):
+        if self.region == 1:
+            return "P"
+        elif self.region == -1:
+            return "M"
+        else:
+            raise ValueError(f"region={self.region}")
+
+    @property
+    def label(self):
+        return f"GE{self.station}1-{self.region_sign}-L{self.layer}"
+
+    @property
+    def offline_label(self):
+        return f"GE{self.region * self.station:+d}1_L{self.layer}"
+
+
 
 GEM_LAYER_ID_LIST = [
     GEMLayerId(1, 1, 2),
@@ -16,21 +80,11 @@ GEM_LAYER_ID_LIST = [
 
 NUM_CHAMBERS = 36
 
-CHAMBER_DATA_FIELDS = (
-    "run",
-    "region",
-    "station",
-    "layer",
-    "chamber",
-    "status",
-    "total",
-    "passed",
-    "eff",
-    "eff_low",
-    "eff_up"
-)
+def load_yaml(path):
+    with open(path, "r") as yaml_file:
+        data = yaml.load(yaml_file, Loader=yaml.SafeLoader)
+    return data
 
-ChamberData = namedtuple("ChamberData", CHAMBER_DATA_FIELDS)
 
 def parse_offline_dqmio_path(path):
     r"""
@@ -62,7 +116,6 @@ class ReportStatus(Enum):
     WARNING = 3
 
 
-
 class ReportSummaryMap:
 
     def __init__(self,  hist):
@@ -71,93 +124,124 @@ class ReportSummaryMap:
         y_axis = hist.GetYaxis()
         for biny in range(1, y_axis.GetNbins() + 1):
             label = y_axis.GetBinLabel(biny)
-            layer_id = self.paser_y_bin_label(label)
+            layer_id = GEMLayerId.from_online_label(label)
 
             report = [hist.GetBinContent(binx, biny) for binx in range(1, NUM_CHAMBERS + 1)]
             report = [ReportStatus(int(each)) for each in report]
+
             self._data[layer_id] = report
  
-    def get_chamber_status(self, layer_id, chamber):
+    def get_status(self, layer_id, chamber):
         return self._data[layer_id][chamber - 1]
 
-    def paser_y_bin_label(self, label):
+
+class BadChamberListReader:
+    def __init__(self, path):
+        bad_chamber_data = load_yaml(path)
+
+        self._bad_chamber_data = {}
+        for run, layer_dict in bad_chamber_data.items():
+            self._bad_chamber_data[run] = {}
+            for layer_label, bad_chamber_list in layer_dict.items():
+                layer_id = GEMLayerId.from_label(layer_label)
+                self._bad_chamber_data[run][layer_id] = bad_chamber_list
+
+        self._bad_run = set()
+
+    def get_dc_report(self, run, layer_id, chamber):
         r"""
-        e.g. GE+1/1L1
         """
-        if len(label) != 8:
-            raise ValueError(label)
-        _, _, region_sign, station, _, ring, _, layer = tuple(label)
-        if region_sign == "+":
-            region = 1
-        elif region_sign == "-":
-            region = -1
+        if run in self._bad_chamber_data:
+            has_dc = True
+            is_good = chamber not in self._bad_chamber_data[run][layer_id]
         else:
-            raise ValueError
+            has_dc = False
+            is_good = False
+        return has_dc, is_good
 
-        try:
-            station = int(station)
-            ring = int(ring)
-            layer = int(layer)
-        except ValueError as error:
-            print(label)
-            raise error
 
-        if ring != 1:
-            raise ValueError(label)
+class OMS:
+    def __init__(self, path):
+        self.df = pd.read_csv(path)
 
-        return GEMLayerId(region, station, layer)
-
+    def get_duration(self, run):
+        duration = self.df[self.df.run == run].duration.to_list()[0]
+        duration = pd.to_datetime(duration, format="%H:%M:%S")
+        duration = duration.hour + duration.minute / 60 + duration.second / 3600
+        return duration
 
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--offline-dir", type=Path, required=True)
-    parser.add_argument("--online-dir", type=Path, required=True)
-    parser.add_argument("--output-path", type=str)
-    parser.add_argument("--confidence-level", type=float, default=0.683)
+    parser = argparse.ArgumentParser(
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    parser.add_argument("--offline", type=Path, required=True,
+                        help="Directory to read offline DQMIO files")
+    parser.add_argument("--online", type=Path, required=True,
+                        help="Directory to read onfline DQMIO files")
+    parser.add_argument("--output", type=Path, default="./",
+                        help="Directory to write data")
+    parser.add_argument("--confidence-level", type=float, default=0.683,
+                        help="Confidence level for Clopper-Pearson function")
     args = parser.parse_args()
 
-    if not args.offline_dir.exists():
-        raise FileNotFoundError(args.offline_dir.resolve())
+    if not args.offline.exists():
+        raise FileNotFoundError(args.offline.resolve())
 
-    if not args.online_dir.exists():
-        raise FileNotFoundError(args.online_dir.resolve())
+    if not args.online.exists():
+        raise FileNotFoundError(args.online.resolve())
 
-    if args.output_path is None:
-        args.output_path = args.offline_dir.name + ".csv"
+    if not args.output.exists():
+        raise FileNotFoundError(args.output.resolve())
 
-    # NOTE
+    # XXX
+    hv_run_list = load_yaml("./data/hv-run.yaml")
+    # {hv: run_list} to {run: hv}
+    run2hv = {}
+    for hv, run_list in hv_run_list.items():
+        run2hv.update({run: hv for run in run_list})
+
+    # XXX OMS
+    oms = OMS("./data/oms.csv")
+
+    # XXX Online DQM
     online_report = {}
-    for path in args.online_dir.glob("*.root"):
+    for path in args.online.glob("*.root"):
         run = parse_online_dqmio_path(path)
         root_file = ROOT.TFile(str(path))
         report_summary_map = root_file.Get(f"DQMData/Run {run}/GEM/Run summary/EventInfo/reportSummaryMap")
         online_report[run] = ReportSummaryMap(report_summary_map)
 
-    # NOTE
+    # XXX Bad Chamber
+    bad_chamber_data = BadChamberListReader("./data/bad-chamber.yaml")
 
+    # XXX Offline DQM
     df = []
-    for path in sorted(args.offline_dir.glob("*.root")):
+    for path in sorted(args.offline.glob("*.root")):
         run = parse_offline_dqmio_path(path)
-        root_file = ROOT.TFile(str(path))
+        duration = oms.get_duration(run)
 
+        root_file = ROOT.TFile(str(path))
         # use 2-leg STA
         gem_dir = root_file.Get(f"DQMData/Run {run}/GEM/Run summary/Efficiency/type1/Efficiency")
+        for key in gem_dir.GetListOfKeys():
+            key = key.GetName()
+            if ME_PATTERN.match(key) is None:
+                continue
 
-        for layer_id in GEM_LAYER_ID_LIST:
-            region, station, layer = layer_id
-            layer_name = f"GE{region * station:+d}1_L{layer}"
+            h_total = gem_dir.Get(key)
+            h_passed = gem_dir.Get(key + "_matched")
 
-            h_total = gem_dir.Get(f"chamber_{layer_name}")
-            h_passed = gem_dir.Get(f"chamber_{layer_name}_matched")
+            layer_label = key[len("chamber_"): ]
+            layer_id = GEMLayerId.from_offline_label(layer_label)
 
             for chamber in range(1, NUM_CHAMBERS + 1):
-                status = online_report[run].get_chamber_status(layer_id, chamber)
+                status = online_report[run].get_status(layer_id, chamber)
+                has_dc, is_good = bad_chamber_data.get_dc_report(run, layer_id, chamber)
 
                 total = int(h_total.GetBinContent(chamber))
                 passed = int(h_passed.GetBinContent(chamber))
 
-                if status is ReportStatus.OK and total > 0:
+                if total > 0:
                     eff = passed / total
 
                     lower_bound = ROOT.TEfficiency.ClopperPearson(
@@ -170,17 +254,32 @@ def main():
                     lower_bound = 0
                     upper_bound = 0
 
-                chamber_data = ChamberData(run, region, station, layer, chamber,
-                                           status.value, total, passed, eff,
-                                           lower_bound, upper_bound)
-                df.append(chamber_data)
+                row = {
+                    "run": run,
+                    "duration": duration,
+                    "hv": run2hv[run],
+                    "region": layer_id.region,
+                    "station": layer_id.station,
+                    "layer": layer_id.layer,
+                    "chamber": chamber,
+                    "online_report": status.value,
+                    "has_dc": has_dc,
+                    "is_good": is_good,
+                    "total": total,
+                    "passed": passed,
+                    "eff": eff,
+                    "eff_low": lower_bound,
+                    "eff_up": upper_bound,
+                }
+                df.append(row)
 
     df = pd.DataFrame(df)
     print(df.head())
     print("...")
     print(df.tail())
 
-    df.to_csv(args.output_path, index=False)
+    output_path = args.output.joinpath(args.offline.name).with_suffix(".csv")
+    df.to_csv(output_path, index=False)
 
 
 
