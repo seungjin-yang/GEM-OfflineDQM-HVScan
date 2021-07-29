@@ -1,12 +1,14 @@
 from pathlib import Path
 from enum import Enum
 from dataclasses import dataclass
-import yaml
 import re
 import argparse
 import warnings
+import yaml
 import pandas as pd
 import ROOT
+
+NUM_CHAMBERS = 36 # consider only GE11 for now
 
 LAYER_LABEL_PATTERN = re.compile("^GE[0-2]1-(M|P)-L[1-6]$")
 LAYER_ONLINE_LABEL_PATTERN = re.compile("^GE(\+|\-)[0-2]\/1L[1-6]$")
@@ -70,15 +72,6 @@ class GEMLayerId:
         return f"GE{self.region * self.station:+d}1_L{self.layer}"
 
 
-
-GEM_LAYER_ID_LIST = [
-    GEMLayerId(1, 1, 2),
-    GEMLayerId(1, 1, 1),
-    GEMLayerId(-1, 1, 1),
-    GEMLayerId(-1, 1, 2),
-]
-
-NUM_CHAMBERS = 36
 
 def load_yaml(path):
     with open(path, "r") as yaml_file:
@@ -160,7 +153,7 @@ class BadChamberListReader:
         return has_dc, is_good
 
 
-class OMS:
+class OMSReader:
     def __init__(self, path):
         self.df = pd.read_csv(path)
 
@@ -201,7 +194,7 @@ def main():
         run2hv.update({run: hv for run in run_list})
 
     # XXX OMS
-    oms = OMS("./data/oms.csv")
+    oms = OMSReader("./data/oms.csv")
 
     # XXX Online DQM
     online_report = {}
