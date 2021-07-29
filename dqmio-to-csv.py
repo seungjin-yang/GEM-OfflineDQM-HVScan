@@ -139,8 +139,6 @@ class BadChamberListReader:
                 layer_id = GEMLayerId.from_label(layer_label)
                 self._bad_chamber_data[run][layer_id] = bad_chamber_list
 
-        self._bad_run = set()
-
     def get_dc_report(self, run, layer_id, chamber):
         r"""
         """
@@ -201,7 +199,8 @@ def main():
     for path in args.online.glob("*.root"):
         run = parse_online_dqmio_path(path)
         root_file = ROOT.TFile(str(path))
-        report_summary_map = root_file.Get(f"DQMData/Run {run}/GEM/Run summary/EventInfo/reportSummaryMap")
+        report_summary_map = root_file.Get(
+            f"DQMData/Run {run}/GEM/Run summary/EventInfo/reportSummaryMap")
         online_report[run] = ReportSummaryMap(report_summary_map)
 
     # XXX Bad Chamber
@@ -215,7 +214,8 @@ def main():
 
         root_file = ROOT.TFile(str(path))
         # use 2-leg STA
-        gem_dir = root_file.Get(f"DQMData/Run {run}/GEM/Run summary/Efficiency/type1/Efficiency")
+        gem_dir = root_file.Get(
+            f"DQMData/Run {run}/GEM/Run summary/Efficiency/type1/Efficiency")
         for key in gem_dir.GetListOfKeys():
             key = key.GetName()
             if ME_PATTERN.match(key) is None:
@@ -229,7 +229,8 @@ def main():
 
             for chamber in range(1, NUM_CHAMBERS + 1):
                 status = online_report[run].get_status(layer_id, chamber)
-                has_dc, is_good = bad_chamber_data.get_dc_report(run, layer_id, chamber)
+                has_dc, is_good = bad_chamber_data.get_dc_report(run, layer_id,
+                                                                 chamber)
 
                 total = int(h_total.GetBinContent(chamber))
                 passed = int(h_passed.GetBinContent(chamber))
