@@ -1,4 +1,4 @@
-# HV Scan using Offline DQM
+# GEM HV Scan using Offline DQM
 
 ## TODO
 - [ ] comparison between efficiencies with asymmetric errors
